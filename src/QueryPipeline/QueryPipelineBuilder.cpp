@@ -618,6 +618,16 @@ void QueryPipelineBuilder::setProgressCallback(ProgressCallback callback)
     progress_callback = callback;
 }
 
+void QueryPipelineBuilder::connectDependencies()
+{
+    for (auto & context : resources.interpreter_context)
+        if (context->connectDepenciesIfNeeded())
+        {
+            pipe.getProcessorsPtr()->emplace_back(context->scheduler);
+            return;
+        }
+}
+
 PipelineExecutorPtr QueryPipelineBuilder::execute()
 {
     if (!isCompleted())

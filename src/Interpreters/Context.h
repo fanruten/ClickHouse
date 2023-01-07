@@ -1,5 +1,11 @@
 #pragma once
 
+#include <base/types.h>
+#include <Common/isLocalAddress.h>
+#include <Common/MultiVersion.h>
+#include <Common/OpenTelemetryTraceContext.h>
+#include <Common/RemoteHostFilter.h>
+#include <Common/ThreadPool.h>
 #include <Core/Block.h>
 #include <Core/NamesAndTypes.h>
 #include <Core/Settings.h>
@@ -8,32 +14,25 @@
 #include <Interpreters/Context_fwd.h>
 #include <Interpreters/DatabaseCatalog.h>
 #include <Interpreters/MergeTreeTransactionHolder.h>
-#include <Parsers/IAST_fwd.h>
-#include <Parsers/ASTSelectQuery.h>
-#include <Storages/IStorage_fwd.h>
-#include <Common/MultiVersion.h>
-#include <Common/OpenTelemetryTraceContext.h>
-#include <Common/RemoteHostFilter.h>
-#include <Common/ThreadPool.h>
-#include <Common/isLocalAddress.h>
-#include <base/types.h>
-#include <Storages/MergeTree/ParallelReplicasReadingCoordinator.h>
-#include <Storages/ColumnsDescription.h>
 #include <IO/IResourceManager.h>
-
+#include <Parsers/ASTSelectQuery.h>
+#include <Parsers/IAST_fwd.h>
+#include <Processors/ResizeProcessor.h>
+#include <Processors/Transforms/RemoteDependencyTransform.h>
 #include <Server/HTTP/HTTPContext.h>
-
+#include <Storages/ColumnsDescription.h>
+#include <Storages/IStorage_fwd.h>
+#include <Storages/MergeTree/ParallelReplicasReadingCoordinator.h>
 
 #include "config.h"
 
 #include <boost/container/flat_set.hpp>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
-
 #include <thread>
-#include <exception>
 
 
 namespace Poco::Net { class IPAddress; }
@@ -97,7 +96,11 @@ class TransactionsInfoLog;
 class ProcessorsProfileLog;
 class FilesystemCacheLog;
 class AsynchronousInsertLog;
+class IAsynchronousReader;
 struct MergeTreeSettings;
+struct InitialAllRangesAnnouncement;
+struct ParallelReadRequest;
+struct ParallelReadResponse;
 class StorageS3Settings;
 class IDatabase;
 class DDLWorker;
@@ -171,7 +174,8 @@ using InputBlocksReader = std::function<Block(ContextPtr)>;
 /// Used in distributed task processing
 using ReadTaskCallback = std::function<String()>;
 
-using MergeTreeReadTaskCallback = std::function<std::optional<PartitionReadResponse>(PartitionReadRequest)>;
+using MergeTreeAllRangesCallback = std::function<void(InitialAllRangesAnnouncement)>;
+using MergeTreeReadTaskCallback = std::function<std::optional<ParallelReadResponse>(ParallelReadRequest)>;
 
 class TemporaryDataOnDiskScope;
 using TemporaryDataOnDiskScopePtr = std::shared_ptr<TemporaryDataOnDiskScope>;
@@ -261,6 +265,7 @@ private:
     /// Used in parallel reading from replicas. A replica tells about its intentions to read
     /// some ranges from some part and initiator will tell the replica about whether it is accepted or denied.
     std::optional<MergeTreeReadTaskCallback> merge_tree_read_task_callback;
+    std::optional<MergeTreeAllRangesCallback> merge_tree_all_ranges_callback;
 
     /// Record entities accessed by current query, and store this information in system.query_log.
     struct QueryAccessInfo
@@ -382,6 +387,7 @@ private:
 
     /// Temporary data for query execution accounting.
     TemporaryDataOnDiskScopePtr temp_data_on_disk;
+
 public:
     /// Some counters for current query execution.
     /// Most of them are workarounds and should be removed in the future.
@@ -403,6 +409,21 @@ public:
     };
 
     KitchenSink kitchen_sink;
+
+    ParallelReplicasReadingCoordinatorPtr parallel_reading_coordinator;
+    mutable std::shared_ptr<ResizeProcessor> scheduler{nullptr};
+    mutable std::shared_ptr<std::vector<DependentProcessor *>> dependencies;
+
+    bool connectDepenciesIfNeeded() const
+    {
+        if (!dependencies || !scheduler)
+            return false;
+        assert(dependencies);
+        assert(scheduler);
+        for (auto * dependency : *dependencies)
+            dependency->connectToScheduler(*scheduler);
+        return true;
+    }
 
 private:
     using SampleBlockCache = std::unordered_map<std::string, Block>;
@@ -1044,6 +1065,9 @@ public:
 
     MergeTreeReadTaskCallback getMergeTreeReadTaskCallback() const;
     void setMergeTreeReadTaskCallback(MergeTreeReadTaskCallback && callback);
+
+    MergeTreeAllRangesCallback getMergeTreeAllRangesCallback() const;
+    void setMergeTreeAllRangesCallback(MergeTreeAllRangesCallback && callback);
 
     /// Background executors related methods
     void initializeBackgroundExecutorsIfNeeded();

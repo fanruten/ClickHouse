@@ -199,6 +199,8 @@ QueryPipelineBuilderPtr QueryPlan::buildQueryPipeline(
     last_pipeline->setProcessListElement(build_pipeline_settings.process_list_element);
     last_pipeline->addResources(std::move(resources));
 
+    last_pipeline->connectDependencies();
+
     return last_pipeline;
 }
 
